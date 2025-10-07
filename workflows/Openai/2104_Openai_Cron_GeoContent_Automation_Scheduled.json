@@ -1,0 +1,537 @@
+{
+  "id": "2104",
+  "name": "AI Country Content Publisher",
+  "nodes": [
+    {
+      "id": "58f67817-c496-4c79-b18f-b0cfcb1e23de",
+      "name": "Every Minute",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 2.1,
+      "position": [
+        200,
+        300
+      ],
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "timezone": "UTC"
+      }
+    },
+    {
+      "id": "324a5ddc-76fc-4d97-8e4c-c21b3069946e",
+      "name": "Fetch Next Country",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        480,
+        300
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH next_country AS (\n  SELECT id\n  FROM geo_country_queue\n  WHERE is_active = true\n  ORDER BY last_generated_at NULLS FIRST, priority DESC\n  LIMIT 1\n)\nSELECT q.id, q.country_name, q.country_code, q.capital, q.region, q.subregion, q.primary_language, q.top_cities, q.context\nFROM geo_country_queue q\nJOIN next_country nc ON q.id = nc.id;"
+      },
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "Postgres Geo Content"
+        }
+      }
+    },
+    {
+      "id": "cafef76b-fdf2-431d-b938-542786ba99c6",
+      "name": "Country Available?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1.1,
+      "position": [
+        720,
+        300
+      ],
+      "parameters": {
+        "conditions": {
+          "boolean": [],
+          "number": [],
+          "string": [
+            {
+              "value1": "={{ $json.country_name || $json.countryName }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "1b678904-080c-4757-85fc-c1c5836db191",
+      "name": "Build Prompts",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1.1,
+      "position": [
+        960,
+        120
+      ],
+      "parameters": {
+        "functionCode": "const record = items[0]?.json || {};\nif (!record || Object.keys(record).length === 0) {\n  return [];\n}\nconst rawCities = record.top_cities ?? record.major_cities ?? record.cities ?? [];\nlet cities = [];\nif (Array.isArray(rawCities)) {\n  cities = rawCities;\n} else if (typeof rawCities === 'string' && rawCities.trim()) {\n  try {\n    const parsed = JSON.parse(rawCities);\n    if (Array.isArray(parsed)) {\n      cities = parsed;\n    } else {\n      cities = rawCities.split(/[,;\n]/);\n    }\n  } catch (error) {\n    cities = rawCities.split(/[,;\n]/);\n  }\n} else if (rawCities && typeof rawCities === 'object') {\n  cities = Object.values(rawCities);\n}\ncities = cities\n  .filter(Boolean)\n  .map((city) => city.toString().trim())\n  .filter((city) => city.length > 0);\nif (record.capital && !cities.includes(record.capital)) {\n  cities.unshift(record.capital);\n}\nconst topCities = Array.from(new Set(cities)).slice(0, 5);\nif (topCities.length === 0 && record.capital) {\n  topCities.push(record.capital);\n}\nconst focusCities = topCities.length > 0 ? topCities.join(', ') : 'key urban centers';\nconst context = record.context || record.narrative_context || '';\nconst countryName = record.country_name || record.countryName || 'the country';\nconst countryCode = record.country_code || record.countryCode || record.iso2 || record.iso_2 || record.cca2 || '';\nconst language = record.primary_language || record.language || 'English';\nconst articlePrompt = [\n  'You are an expert travel writer creating evergreen destination content for a live geography insights dashboard.',\n  `Write a 300-word English article about ${countryName}.`,\n  'Structure it with: an inviting introduction, geography & climate, economy & innovation, cultural highlights, and a practical travel tips conclusion.',\n  `Reference these priority cities: ${focusCities}.`,\n  context ? `Incorporate this strategic briefing: ${context}.` : '',\n  'Keep the tone informative yet inspiring, avoid bullet lists, and stay between 290 and 310 words.'\n].filter(Boolean).join(' ');\nconst imagePrompt = [\n  `Generate five unique high-resolution square map illustrations for ${countryName}${countryCode ? ` (${countryCode})` : ''}.`,\n  `Each map must spotlight ${focusCities} with clear city markers and accurate coastlines or borders.`,\n  'Variation 1: Political-style map with regional boundaries and a highlighted capital.',\n  'Variation 2: Topographic relief map emphasizing terrain, mountains, and waterways.',\n  'Variation 3: Nighttime satellite-inspired map showing illuminated metropolitan areas.',\n  'Variation 4: Minimalist contour map with pastel palette, rivers, and typography.',\n  'Variation 5: Tourist infographic map showcasing landmarks and major transport corridors.',\n  'Use English labels and keep compositions ready for a content dashboard.'\n].join(' ');\nreturn [\n  {\n    json: {\n      queueId: record.id ?? null,\n      countryCode,\n      countryName,\n      capital: record.capital || '',\n      region: record.region || '',\n      subregion: record.subregion || '',\n      primaryLanguage: language,\n      narrativeContext: context,\n      topCities,\n      focusCities,\n      articlePrompt,\n      imagePrompt\n    }\n  }\n];"
+      }
+    },
+    {
+      "id": "98437101-b935-4b4d-a1e6-dfd21964fe24",
+      "name": "Draft Article",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        1200,
+        120
+      ],
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4.1-mini",
+          "cachedResultName": "GPT-4.1-mini"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "={{ $json.articlePrompt }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.7
+        },
+        "jsonOutput": true
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": "YOUR_OPENAI_CREDENTIAL_ID",
+          "name": "OpenAI API Key"
+        }
+      }
+    },
+    {
+      "id": "60015633-b17c-4eb2-91b7-6d6394377e14",
+      "name": "Structure Article",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2.1,
+      "position": [
+        1400,
+        120
+      ],
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "articleText",
+              "value": "={{ $json.message.content }}"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "ebcd906c-e3c8-4ce5-973f-3b36115749ed",
+      "name": "Merge Article Context",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [
+        1600,
+        120
+      ],
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "mergeByPosition",
+        "options": {}
+      }
+    },
+    {
+      "id": "477f583c-3e4f-4779-8253-c3b512f33ead",
+      "name": "Generate Map Images",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1800,
+        120
+      ],
+      "parameters": {
+        "url": "https://api.openai.com/v1/images/generations",
+        "method": "POST",
+        "sendHeaders": true,
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-image-1\",\n  \"prompt\": \"{{$json.imagePrompt}}\",\n  \"n\": 5,\n  \"size\": \"1024x1024\",\n  \"quality\": \"high\"\n}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_OPENAI_IMAGE_CREDENTIAL_ID",
+          "name": "OpenAI Image API"
+        }
+      }
+    },
+    {
+      "id": "6f63e610-8056-421a-a1b6-4905fe492f71",
+      "name": "Merge Image Context",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [
+        2000,
+        120
+      ],
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "mergeByPosition",
+        "options": {}
+      }
+    },
+    {
+      "id": "d1e79105-56b8-4d77-8fbc-5d5cf2adebed",
+      "name": "Prepare Country Payload",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1.1,
+      "position": [
+        2200,
+        120
+      ],
+      "parameters": {
+        "functionCode": "const source = items[0]?.json || {};\nconst mapData = Array.isArray(source.data) ? source.data : [];\nconst imageUrls = mapData\n  .map((entry) => entry.url || (entry.b64_json ? `data:image/png;base64,${entry.b64_json}` : null))\n  .filter(Boolean);\nconst article = source.articleText || (source.message && source.message.content) || '';\nconst wordCount = article\n  .replace(/\\s+/g, ' ')\n  .trim()\n  .split(' ')\n  .filter(Boolean)\n  .length;\nconst topCities = Array.isArray(source.topCities) ? source.topCities : [];\nconst sanitizeText = (value) => {\n  if (value === null || value === undefined || value === '') {\n    return null;\n  }\n  return value.toString().replace(/'/g, \"''\");\n};\nconst sanitizeJson = (value) => JSON.stringify(value ?? []).replace(/'/g, \"''\");\nconst toSqlText = (value) => {\n  const sanitized = sanitizeText(value);\n  return sanitized === null ? 'NULL' : \"'\" + sanitized + \"'\";\n};\nconst toSqlJson = (value) => \"'\" + sanitizeJson(value) + \"'::jsonb\";\nconst narrative = source.narrativeContext || '';\nconst generatedAt = new Date().toISOString();\nreturn [\n  {\n    json: {\n      queueId: source.queueId ?? null,\n      countryCode: (source.countryCode || '').toString(),\n      countryName: source.countryName || '',\n      capital: source.capital || '',\n      region: source.region || '',\n      subregion: source.subregion || '',\n      primaryLanguage: source.primaryLanguage || 'English',\n      narrativeContext: narrative,\n      topCities,\n      articleText: article,\n      wordCount,\n      imageUrls,\n      articlePrompt: source.articlePrompt,\n      imagePrompt: source.imagePrompt,\n      generatedAt,\n      sql: {\n        countryCode: toSqlText(source.countryCode || ''),\n        countryName: toSqlText(source.countryName || ''),\n        capital: toSqlText(source.capital || ''),\n        region: toSqlText(source.region || ''),\n        subregion: toSqlText(source.subregion || ''),\n        primaryLanguage: toSqlText(source.primaryLanguage || 'English'),\n        narrativeContext: toSqlText(narrative),\n        topCities: toSqlJson(topCities),\n        articleText: toSqlText(article),\n        imageUrls: toSqlJson(imageUrls),\n        generatedAt: \"'\" + generatedAt + \"'::timestamptz\"\n      }\n    }\n  }\n];"
+      }
+    },
+    {
+      "id": "7db2546d-d939-4349-b982-4ff123e10519",
+      "name": "Upsert Country Content",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2400,
+        120
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO geo_country_content (\n  country_code,\n  country_name,\n  capital,\n  region,\n  subregion,\n  primary_language,\n  narrative_context,\n  top_cities,\n  article_text,\n  article_word_count,\n  image_urls,\n  generated_at\n) VALUES (\n  {{ $json.sql.countryCode }},\n  {{ $json.sql.countryName }},\n  {{ $json.sql.capital }},\n  {{ $json.sql.region }},\n  {{ $json.sql.subregion }},\n  {{ $json.sql.primaryLanguage }},\n  {{ $json.sql.narrativeContext }},\n  {{ $json.sql.topCities }},\n  {{ $json.sql.articleText }},\n  {{ $json.wordCount || 0 }},\n  {{ $json.sql.imageUrls }},\n  {{ $json.sql.generatedAt }}\n)\nON CONFLICT (country_code) DO UPDATE\nSET\n  country_name = EXCLUDED.country_name,\n  capital = EXCLUDED.capital,\n  region = EXCLUDED.region,\n  subregion = EXCLUDED.subregion,\n  primary_language = EXCLUDED.primary_language,\n  narrative_context = EXCLUDED.narrative_context,\n  top_cities = EXCLUDED.top_cities,\n  article_text = EXCLUDED.article_text,\n  article_word_count = EXCLUDED.article_word_count,\n  image_urls = EXCLUDED.image_urls,\n  generated_at = EXCLUDED.generated_at\nRETURNING id;"
+      },
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "Postgres Geo Content"
+        }
+      }
+    },
+    {
+      "id": "7d99d52a-8719-4f16-8c61-7749fc23988e",
+      "name": "Merge Insert Result",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [
+        2600,
+        120
+      ],
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "mergeByPosition",
+        "options": {}
+      }
+    },
+    {
+      "id": "4b873748-6c1c-41b3-aefc-df74e7949dcc",
+      "name": "Update Queue",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        2800,
+        120
+      ],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE geo_country_queue\nSET\n  last_generated_at = NOW(),\n  last_article_word_count = {{ $json.wordCount || 0 }},\n  next_run = NOW() + INTERVAL '1 minute'\nWHERE id = {{ $json.queueId || 0 }};"
+      },
+      "credentials": {
+        "postgres": {
+          "id": "YOUR_POSTGRES_CREDENTIAL_ID",
+          "name": "Postgres Geo Content"
+        }
+      }
+    },
+    {
+      "id": "89512a07-9803-45f2-b8ac-d0a967df0854",
+      "name": "Merge Queue Update",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2.1,
+      "position": [
+        3000,
+        120
+      ],
+      "parameters": {
+        "mode": "combine",
+        "combinationMode": "mergeByPosition",
+        "options": {}
+      }
+    },
+    {
+      "id": "1ce59b32-2c30-4314-8731-a72fc68d94b2",
+      "name": "Notify Dashboard",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3200,
+        120
+      ],
+      "parameters": {
+        "url": "https://your-dashboard.example.com/api/revalidate",
+        "method": "POST",
+        "sendHeaders": true,
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"countryCode\": \"{{$json.countryCode}}\",\n  \"countryName\": \"{{$json.countryName}}\",\n  \"articleId\": {{$json.id ?? 'null'}},\n  \"publishedAt\": \"{{$json.generatedAt}}\"\n}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "YOUR_DASHBOARD_API_CREDENTIAL_ID",
+          "name": "Dashboard API"
+        }
+      }
+    },
+    {
+      "id": "859b43bd-a001-47f2-8127-fd04370ec31c",
+      "name": "No Pending Countries",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 2.1,
+      "position": [
+        960,
+        460
+      ],
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "status",
+              "value": "queue_empty"
+            },
+            {
+              "name": "message",
+              "value": "No countries waiting for publication."
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "11f9af50-cbba-4abe-80d7-5efbaac21a0c",
+      "name": "Workflow Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1260,
+        -120
+      ],
+      "parameters": {
+        "content": "# Country + City AI Publisher\n\n**What it does**\n- Triggers every minute via Cron.\n- Claims the next country record from `geo_country_queue`.\n- Crafts a 300-word English article with OpenAI.\n- Generates five map images with the OpenAI Images endpoint.\n- Stores the article and asset metadata in `geo_country_content`.\n- Marks the queue entry as completed and pings the dashboard revalidation webhook.\n\n**Setup checklist**\n1. Configure the Postgres credential to point at the content database.\n2. Ensure tables `geo_country_queue` and `geo_country_content` exist with the referenced columns.\n3. Provide OpenAI API credentials (text + image).\n4. Replace the dashboard webhook URL/credential with your deployment endpoint.\n5. Optionally extend the queue update query to schedule future reruns.",
+        "width": 640,
+        "height": 420
+      }
+    }
+  ],
+  "connections": {
+    "Every Minute": {
+      "main": [
+        [
+          {
+            "node": "Fetch Next Country",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Next Country": {
+      "main": [
+        [
+          {
+            "node": "Country Available?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Country Available?": {
+      "main": [
+        [
+          {
+            "node": "Build Prompts",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Pending Countries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Prompts": {
+      "main": [
+        [
+          {
+            "node": "Draft Article",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge Article Context",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Draft Article": {
+      "main": [
+        [
+          {
+            "node": "Structure Article",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structure Article": {
+      "main": [
+        [
+          {
+            "node": "Merge Article Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Article Context": {
+      "main": [
+        [
+          {
+            "node": "Generate Map Images",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge Image Context",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Generate Map Images": {
+      "main": [
+        [
+          {
+            "node": "Merge Image Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Image Context": {
+      "main": [
+        [
+          {
+            "node": "Prepare Country Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Country Payload": {
+      "main": [
+        [
+          {
+            "node": "Upsert Country Content",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge Insert Result",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Upsert Country Content": {
+      "main": [
+        [
+          {
+            "node": "Merge Insert Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Insert Result": {
+      "main": [
+        [
+          {
+            "node": "Update Queue",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Merge Queue Update",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Update Queue": {
+      "main": [
+        [
+          {
+            "node": "Merge Queue Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Queue Update": {
+      "main": [
+        [
+          {
+            "node": "Notify Dashboard",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "staticData": null
+}
